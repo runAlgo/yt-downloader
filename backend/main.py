@@ -6,9 +6,9 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any
 
 import yt_dlp
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
@@ -17,35 +17,44 @@ app = FastAPI(title="YouTube Video & Audio Downloader API")
 
 
 # ============================================================
-# CORS
+# CORS (BULLETPROOF CONFIGURATION FOR VERCEL & RENDER)
 # ============================================================
-
-FRONTEND_URL = os.getenv(
-    "FRONTEND_URL",
-    "http://localhost:3000"
-).rstrip("/")
-
-ALLOWED_ORIGINS = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    "http://localhost:3001",
-    "http://127.0.0.1:3001",
-    "https://frontend-gilt-beta-87.vercel.app",
-]
-
-if FRONTEND_URL and FRONTEND_URL not in ALLOWED_ORIGINS:
-    ALLOWED_ORIGINS.append(FRONTEND_URL)
-
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_origin_regex=r"https://.*\.vercel\.app",
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["Content-Disposition"],
+    expose_headers=["Content-Disposition", "*"],
 )
+
+
+@app.middleware("http")
+async def cors_middleware(request: Request, call_next):
+    origin = request.headers.get("origin") or "*"
+
+    if request.method == "OPTIONS":
+        response = Response(status_code=204)
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS, PUT, DELETE"
+        response.headers["Access-Control-Allow-Headers"] = "*"
+        response.headers["Access-Control-Expose-Headers"] = "Content-Disposition, *"
+        return response
+
+    try:
+        response = await call_next(request)
+    except Exception as exc:
+        response = JSONResponse(
+            status_code=500,
+            content={"detail": f"Server Error: {str(exc)}"}
+        )
+
+    response.headers["Access-Control-Allow-Origin"] = origin
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS, PUT, DELETE"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    response.headers["Access-Control-Expose-Headers"] = "Content-Disposition, *"
+    return response
 
 
 # ============================================================
@@ -103,9 +112,38 @@ def get_ffmpeg_path() -> Optional[str]:
         return None
 
 
-def get_base_ydl_opts() -> dict:
+def get_cookies_file_path() -> Optional[str]:
+    backend_cookies = Path(__file__).parent / "cookies.txt"
+    if backend_cookies.exists():
+        return str(backend_cookies)
+    root_cookies = Path(__file__).parent.parent / "cookies.txt"
+    if root_cookies.exists():
+        return str(root_cookies)
+
+    cookies_env = os.environ.get("YOUTUBE_COOKIES")
+    if cookies_env:
+        temp_cookie = Path(tempfile.gettempdir()) / "yt_cookies.txt"
+        try:
+            import base64
+            try:
+                decoded = base64.b64decode(cookies_env).decode("utf-8")
+                if "# Netscape HTTP Cookie File" in decoded or "domain" in decoded.lower():
+                    temp_cookie.write_text(decoded, encoding="utf-8")
+                    return str(temp_cookie)
+            except Exception:
+                pass
+            temp_cookie.write_text(cookies_env, encoding="utf-8")
+            return str(temp_cookie)
+        except Exception:
+            pass
+    return None
+
+
+def get_base_ydl_opts(client_fallback: bool = False) -> dict:
 
     ffmpeg_exe = get_ffmpeg_path()
+
+    clients = ["mweb", "tv", "web"] if client_fallback else ["ios", "mweb", "android"]
 
     opts = {
         "quiet": True,
@@ -388,119 +426,109 @@ def download_video(payload: DownloadRequest):
         if info is None:
             raise RuntimeError("Failed to extract video info.")
 
-            raw_title = info.get(
-                "title",
-                "video"
+        raw_title = info.get(
+            "title",
+            "video"
+        )
+
+        clean_title = safe_filename(
+            raw_title
+        )
+
+        # Find downloaded files
+        files = [
+            p
+            for p in Path(temp_dir).glob("*")
+            if (
+                p.is_file()
+                and not p.name.endswith(
+                    (".part", ".ytdl")
+                )
+            )
+        ]
+
+        if not files:
+            raise RuntimeError(
+                "Downloaded file was not found."
             )
 
-            clean_title = safe_filename(
-                raw_title
-            )
+        # ------------------------------------------------
+        # Select final file
+        # ------------------------------------------------
 
-            # Find downloaded files
-            files = [
-                p
-                for p in Path(temp_dir).glob("*")
-                if (
-                    p.is_file()
-                    and not p.name.endswith(
-                        (".part", ".ytdl")
-                    )
-                )
-            ]
+        if is_audio:
+            target_ext = ".mp3"
 
-            if not files:
-
-                raise RuntimeError(
-                    "Downloaded file was not found."
-                )
-
-            # ------------------------------------------------
-            # Select final file
-            # ------------------------------------------------
-
-            if is_audio:
-
-                target_ext = ".mp3"
-
-                matching_file = next(
-                    (
-                        f
-                        for f in files
-                        if f.suffix.lower()
-                        == target_ext
-                    ),
-                    None
-                )
-
-                if matching_file is None:
-
-                    raise RuntimeError(
-                        "MP3 file was not created."
-                    )
-
-                actual_filename = (
-                    f"{clean_title}.mp3"
-                )
-
-                media_type = "audio/mpeg"
-
-            else:
-
-                matching_file = next(
-                    (
-                        f
-                        for f in files
-                        if f.suffix.lower() == ".mp4"
-                    ),
-                    None
-                )
-
-                if matching_file is None:
-                    matching_file = next(
-                        (
-                            f
-                            for f in files
-                            if f.suffix.lower() == ".mkv"
-                        ),
-                        None
-                    )
-
-                if matching_file is None:
-
-                    raise RuntimeError(
-                        "Video file was not created."
-                    )
-
-                out_ext = matching_file.suffix.lower()
-
-                actual_filename = (
-                    f"{clean_title}_1080p{out_ext}"
-                )
-
-                media_type = (
-                    "video/mp4"
-                    if out_ext == ".mp4"
-                    else "video/x-matroska"
-                )
-
-            # ------------------------------------------------
-            # Return file
-            # ------------------------------------------------
-
-            return FileResponse(
-
-                path=str(matching_file),
-
-                media_type=media_type,
-
-                filename=actual_filename,
-
-                background=BackgroundTask(
-                    cleanup_temp_dir,
-                    temp_dir
+            matching_file = next(
+                (
+                    f
+                    for f in files
+                    if f.suffix.lower() == target_ext
                 ),
+                None
             )
+
+            if matching_file is None:
+                raise RuntimeError(
+                    "MP3 file was not created."
+                )
+
+            actual_filename = (
+                f"{clean_title}.mp3"
+            )
+
+            media_type = "audio/mpeg"
+
+        else:
+            matching_file = next(
+                (
+                    f
+                    for f in files
+                    if f.suffix.lower() == ".mp4"
+                ),
+                None
+            )
+
+            if matching_file is None:
+                matching_file = next(
+                    (
+                        f
+                        for f in files
+                        if f.suffix.lower() == ".mkv"
+                    ),
+                    None
+                )
+
+            if matching_file is None:
+                raise RuntimeError(
+                    "Video file was not created."
+                )
+
+            out_ext = matching_file.suffix.lower()
+
+            actual_filename = (
+                f"{clean_title}_1080p{out_ext}"
+            )
+
+            media_type = (
+                "video/mp4"
+                if out_ext == ".mp4"
+                else "video/x-matroska"
+            )
+
+        # ------------------------------------------------
+        # Return file
+        # ------------------------------------------------
+
+        return FileResponse(
+            path=str(matching_file),
+            media_type=media_type,
+            filename=actual_filename,
+            background=BackgroundTask(
+                cleanup_temp_dir,
+                temp_dir
+            ),
+        )
 
     except Exception as exc:
 
