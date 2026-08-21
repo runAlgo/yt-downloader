@@ -34,7 +34,8 @@ yt-downloader-fullstack/
 ```bash
 cd backend
 C:\Python314\python.exe -m pip install -r requirements.txt
-C:\Python314\python.exe -m uvicorn main:app --reload --port 8000
+C:\Python314\python.exe -m uvicorn main:app --reload --port 8000 or 
+python -m uvicorn main:app --reload --port 8000
 ```
 
 Backend:
