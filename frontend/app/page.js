@@ -15,6 +15,27 @@ const DEFAULT_AUDIO_QUALITIES = [
   { id: "mp3_192", label: "MP3 Standard (192kbps)", badge: "🎧 MP3 192k", type: "audio" },
 ];
 
+// Translate raw backend/yt-dlp error text into something a user can
+// actually act on, instead of showing internal tool output.
+function friendlyErrorMessage(rawDetail) {
+  const text = (rawDetail || "").toLowerCase();
+
+  if (text.includes("sign in to confirm") || text.includes("not a bot")) {
+    return "This video is temporarily unavailable for download — please try again in a few minutes.";
+  }
+  if (text.includes("private video") || text.includes("this video is private")) {
+    return "This video is private and can't be downloaded.";
+  }
+  if (text.includes("video unavailable") || text.includes("removed")) {
+    return "This video is unavailable — it may have been removed or region-restricted.";
+  }
+  if (text.includes("could not extract") || text.includes("unsupported url")) {
+    return "That doesn't look like a valid YouTube link — please check the URL and try again.";
+  }
+
+  return rawDetail || "Something went wrong. Please try again.";
+}
+
 export default function Home() {
   const [activeTab, setActiveTab] = useState("video"); // "video" or "mp3"
   const [url, setUrl] = useState("");
@@ -67,7 +88,7 @@ export default function Home() {
       const data = await response.json();
 
       if (!response.ok) {
-        throw new Error(data.detail || "Failed to fetch media details.");
+        throw new Error(friendlyErrorMessage(data.detail || "Failed to fetch media details."));
       }
 
       setVideoInfo(data);
@@ -124,13 +145,21 @@ export default function Home() {
           const data = await response.json();
           detail = data.detail || detail;
         } catch {}
-        throw new Error(detail);
+        throw new Error(friendlyErrorMessage(detail));
       }
 
       setDownloadStep(isMp3 ? "Converting audio to 320kbps MP3..." : "Merging unconstrained ultra high bitrate video & audio...");
 
+      const blob = await response.blob();
+
+      // Backend picks the real container based on the source codec:
+      // most videos come back as .mp4, but 4K/2K sources that yt-dlp
+      // can't losslessly remux into mp4 come back as .mkv instead.
+      // Content-Disposition (when present) already has the correct
+      // extension — only fall back to guessing from the blob's mime
+      // type if that header is ever missing.
       const disposition = response.headers.get("content-disposition") || "";
-      let filename = `media.${formatType}`;
+      let filename = null;
       const match = disposition.match(/filename\*?=(?:UTF-8'')?["']?([^"';]+)["']?/i);
       if (match && match[1]) {
         filename = decodeURIComponent(match[1]);
@@ -138,14 +167,20 @@ export default function Home() {
         const simpleMatch = disposition.match(/filename="?([^"]+)"?/i);
         if (simpleMatch && simpleMatch[1]) {
           filename = simpleMatch[1];
-        } else if (videoInfo && videoInfo.title) {
-          filename = `${videoInfo.title}.${formatType}`;
         }
       }
 
-      setDownloadStep("Finalizing download & saving file...");
+      if (!filename) {
+        const guessedExt = isMp3
+          ? "mp3"
+          : blob.type === "video/x-matroska"
+          ? "mkv"
+          : "mp4";
+        const baseName = (videoInfo && videoInfo.title) || "media";
+        filename = `${baseName}.${guessedExt}`;
+      }
 
-      const blob = await response.blob();
+      setDownloadStep("Finalizing download & saving file...");
       const blobUrl = window.URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = blobUrl;
