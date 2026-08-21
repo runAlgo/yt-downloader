@@ -77,10 +77,15 @@ Start Command:
 uvicorn main:app --host 0.0.0.0 --port $PORT
 ```
 
-Add environment variable:
+Add Environment Variables in Render Dashboard:
 
 ```text
 FRONTEND_URL=https://YOUR-VERCEL-DOMAIN.vercel.app
+```
+
+*(Optional - if YouTube blocks datacenter IPs)*: Export YouTube cookies from your browser (using an extension like "Get cookies.txt LOCALLY") and paste the cookie content into a Render environment variable:
+```text
+YOUTUBE_COOKIES=<paste-cookie-content-or-base64>
 ```
 
 ## Deploy frontend to Vercel

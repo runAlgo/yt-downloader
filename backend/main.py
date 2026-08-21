@@ -114,31 +114,24 @@ def get_base_ydl_opts() -> dict:
 
         "extractor_args": {
             "youtube": {
-                # IMPORTANT: "android" must NOT come first.
-                # The Android client only exposes formats up to
-                # 1080p — it never returns the 1440p/2160p (4K)
-                # adaptive streams at all, regardless of format
-                # selector. "web" and "web_creator" are the clients
-                # that actually expose high-res VP9/AV1 formats.
-                "player_client": [
-                    "web",
-                    "web_creator",
-                    "tv",
-                    "android",
-                ],
+                "player_client": clients,
             }
         },
 
         "http_headers": {
             "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 "
-                "(KHTML, like Gecko) "
-                "Chrome/120.0.0.0 "
-                "Safari/537.36"
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4_1 like Mac OS X) "
+                "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+                "Version/17.4.1 Mobile/15E148 Safari/604.1"
             ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
         },
     }
+
+    cookie_path = get_cookies_file_path()
+    if cookie_path:
+        opts["cookiefile"] = cookie_path
 
     if ffmpeg_exe:
         opts["ffmpeg_location"] = ffmpeg_exe
@@ -197,108 +190,82 @@ def get_video_info(payload: InfoRequest):
         )
 
     ydl_opts = get_base_ydl_opts()
-
     ydl_opts["skip_download"] = True
 
     try:
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+        except Exception as exc:
+            err_msg = str(exc).lower()
+            if any(k in err_msg for k in ["bot", "sign in", "confirm you", "cookies"]):
+                fallback_opts = get_base_ydl_opts(client_fallback=True)
+                fallback_opts["skip_download"] = True
+                with yt_dlp.YoutubeDL(fallback_opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
+            else:
+                raise exc
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-
-            info = ydl.extract_info(
-                url,
-                download=False
+        if info is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Could not extract video details."
             )
 
-            if info is None:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Could not extract video details."
-                )
+        title = info.get("title", "Unknown Title")
+        uploader = info.get("uploader") or info.get("channel") or "Unknown Uploader"
+        duration = info.get("duration", 0)
+        duration_str = format_duration(duration)
 
-            title = info.get(
-                "title",
-                "Unknown Title"
-            )
+        thumbnails = info.get("thumbnails") or []
+        thumbnail = info.get("thumbnail") or (thumbnails[-1].get("url") if thumbnails else "")
+        view_count = info.get("view_count", 0)
 
-            uploader = (
-                info.get("uploader")
-                or info.get("channel")
-                or "Unknown Uploader"
-            )
+        quality_options: List[Dict[str, Any]] = [
+            {
+                "id": "best",
+                "label": "Max Quality 4K / Ultra HD (Auto)",
+                "badge": "🔥 MAX 4K/HD",
+                "type": "video",
+            },
+            {
+                "id": "1080",
+                "label": "1080p Full HD (60fps High Bitrate)",
+                "badge": "✨ 1080p FULL HD",
+                "type": "video",
+            },
+            {
+                "id": "720",
+                "label": "720p HD",
+                "badge": "🎬 720p HD",
+                "type": "video",
+            },
+            {
+                "id": "mp3_320",
+                "label": "MP3 Audio (320kbps Studio)",
+                "badge": "🎵 MP3 320k",
+                "type": "audio",
+            },
+            {
+                "id": "mp3_192",
+                "label": "MP3 Audio (192kbps Standard)",
+                "badge": "🎵 MP3 192k",
+                "type": "audio",
+            },
+        ]
 
-            duration = info.get(
-                "duration",
-                0
-            )
-
-            duration_str = format_duration(
-                duration
-            )
-
-            thumbnails = info.get(
-                "thumbnails"
-            ) or []
-
-            thumbnail = (
-                info.get("thumbnail")
-                or (
-                    thumbnails[-1].get("url")
-                    if thumbnails
-                    else ""
-                )
-            )
-
-            view_count = info.get(
-                "view_count",
-                0
-            )
-
-            quality_options: List[Dict[str, Any]] = [
-                {
-                    "id": "best",
-                    "label": "Max Quality 4K / Ultra HD (Auto)",
-                    "badge": "🔥 MAX 4K/HD",
-                    "type": "video",
-                },
-                {
-                    "id": "1080",
-                    "label": "1080p Full HD (60fps High Bitrate)",
-                    "badge": "✨ 1080p FULL HD",
-                    "type": "video",
-                },
-                {
-                    "id": "720",
-                    "label": "720p HD",
-                    "badge": "🎬 720p HD",
-                    "type": "video",
-                },
-                {
-                    "id": "mp3_320",
-                    "label": "MP3 Audio (320kbps Studio)",
-                    "badge": "🎵 MP3 320k",
-                    "type": "audio",
-                },
-                {
-                    "id": "mp3_192",
-                    "label": "MP3 Audio (192kbps Standard)",
-                    "badge": "🎵 MP3 192k",
-                    "type": "audio",
-                },
-            ]
-
-            return {
-                "title": title,
-                "uploader": uploader,
-                "duration": duration,
-                "duration_str": duration_str,
-                "thumbnail": thumbnail,
-                "view_count": view_count,
-                "quality_options": quality_options,
-                "url": url,
-            }
+        return {
+            "title": title,
+            "uploader": uploader,
+            "duration": duration,
+            "duration_str": duration_str,
+            "thumbnail": thumbnail,
+            "view_count": view_count,
+            "quality_options": quality_options,
+            "url": url,
+        }
 
     except Exception as exc:
-
         raise HTTPException(
             status_code=400,
             detail=f"Failed to fetch video info: {str(exc)}"
@@ -399,19 +366,27 @@ def download_video(payload: DownloadRequest):
     # ========================================================
 
     try:
+        info = None
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+        except Exception as exc:
+            err_msg = str(exc).lower()
+            if any(k in err_msg for k in ["bot", "sign in", "confirm you", "cookies"]):
+                fallback_opts = get_base_ydl_opts(client_fallback=True)
+                fallback_opts.update({
+                    "outtmpl": ydl_opts.get("outtmpl"),
+                    "format": ydl_opts.get("format"),
+                    "merge_output_format": ydl_opts.get("merge_output_format"),
+                    "postprocessors": ydl_opts.get("postprocessors", []),
+                })
+                with yt_dlp.YoutubeDL(fallback_opts) as ydl:
+                    info = ydl.extract_info(url, download=True)
+            else:
+                raise exc
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-
-            info = ydl.extract_info(
-                url,
-                download=True
-            )
-
-            if info is None:
-
-                raise RuntimeError(
-                    "Failed to extract video info."
-                )
+        if info is None:
+            raise RuntimeError("Failed to extract video info.")
 
             raw_title = info.get(
                 "title",
